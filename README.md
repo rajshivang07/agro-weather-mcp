@@ -10,19 +10,17 @@ agronomists, and agricultural software experiments.
 With uv:
 
 ```sh
-uvx --from git+https://github.com/your-org/agro-weather-mcp agro-weather-mcp
+uvx --from git+https://github.com/rajshivang07/agro-weather-mcp agro-weather-mcp
 ```
 
 For local development:
 
 ```sh
-git clone https://github.com/your-org/agro-weather-mcp
+git clone https://github.com/rajshivang07/agro-weather-mcp
 cd agro-weather-mcp
 uv sync --extra dev
 uv run agro-weather-mcp
 ```
-
-Replace the example GitHub owner with the repository URL where you publish this project.
 
 ## Who can use this and where
 
@@ -64,7 +62,7 @@ Add this entry to the Claude Desktop MCP configuration:
   "mcpServers": {
     "agro-weather": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/your-org/agro-weather-mcp", "agro-weather-mcp"]
+      "args": ["--from", "git+https://github.com/rajshivang07/agro-weather-mcp", "agro-weather-mcp"]
     }
   }
 }
@@ -73,7 +71,7 @@ Add this entry to the Claude Desktop MCP configuration:
 ### Claude Code
 
 ```sh
-claude mcp add agro-weather -- uvx --from git+https://github.com/your-org/agro-weather-mcp agro-weather-mcp
+claude mcp add agro-weather -- uvx --from git+https://github.com/rajshivang07/agro-weather-mcp agro-weather-mcp
 ```
 
 ## Tools
@@ -252,7 +250,7 @@ Example prompts:
 - “Find the three closest matches for Davis, California, then calculate April GDD using a 10 C base.”
 - “What is the frost risk for this location over the next seven days at 0 C?”
 - “Was the last month wetter or drier than reference crop demand?”
-- “Are soil temperatures suitable for sowing corn at this location?”
+- “What are the current and next-48-hour soil conditions at this location?”
 
 ## Data and limits
 
