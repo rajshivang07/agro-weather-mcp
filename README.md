@@ -24,6 +24,37 @@ uv run agro-weather-mcp
 
 Replace the example GitHub owner with the repository URL where you publish this project.
 
+## Who can use this and where
+
+This server is useful anywhere an MCP-compatible assistant needs agriculture
+weather context without building a custom Open-Meteo integration. It runs as a
+local process over stdio, so users do not need to operate a web server, deploy
+cloud infrastructure, or create an API key.
+
+Typical users and environments include:
+
+- Farmers who want a conversational way to check frost risk, recent water balance, or soil conditions for a field.
+- Agronomists and crop advisors who need quick GDD calculations and weather summaries during field planning.
+- Farm-management and precision-agriculture software teams that want reusable weather tools in an LLM workflow.
+- Researchers and students prototyping crop-weather assistants without paying for a weather data service.
+- Developers building local assistants in Claude Desktop, Claude Code, MCP Inspector, or another MCP-compatible client.
+- Teams testing agricultural workflows before connecting them to their own field records, sensors, or farm databases.
+
+Example workflows include:
+
+- Geocode a farm, then inspect current and 48-hour soil conditions before discussing sowing timing.
+- Calculate seasonal GDD from historical archive data and extend the range into the forecast when appropriate.
+- Check the next 7 days for overnight frost exposure before recommending a field visit or crop-protection review.
+- Compare precipitation with reference ET0 to identify periods that deserve closer soil-moisture monitoring.
+- Use the five standardized tools as a weather layer inside a larger farm assistant, while keeping farm-specific decisions in the application that owns the field data.
+
+This project is best suited to local development, personal assistants, demos,
+education, research, and non-commercial prototypes that respect Open-Meteo's
+free-tier terms and rate limits. It is not a replacement for a farm's weather
+station, irrigation model, crop model, regulated advisory service, or local
+agronomic expertise. Outputs are informational and should be reviewed before
+being used in operational decisions.
+
 ### Claude Desktop
 
 Add this entry to the Claude Desktop MCP configuration:

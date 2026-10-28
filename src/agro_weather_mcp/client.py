@@ -16,6 +16,7 @@ class OpenMeteoClient:
         self._cache: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[float, Any]] = {}
 
     async def get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
+        # Sorting makes equivalent parameter dictionaries share one cache key.
         key = (url, tuple(sorted((str(k), str(v)) for k, v in params.items())))
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < self.ttl_seconds:
@@ -24,10 +25,13 @@ class OpenMeteoClient:
         for attempt in range(3):
             try:
                 response = await self.http.get(url, params=params)
+                # Open-Meteo can throttle requests or fail temporarily. Retry
+                # twice with increasing delays before surfacing the error.
                 if response.status_code == 429 or response.status_code >= 500:
                     response.raise_for_status()
                 response.raise_for_status()
                 data = response.json()
+                # Cache only successful JSON responses, never errors.
                 self._cache[key] = (time.monotonic(), data)
                 return data
             except (httpx.HTTPError, ValueError) as exc:
@@ -39,4 +43,6 @@ class OpenMeteoClient:
         ) from last_error
 
     async def aclose(self) -> None:
+        # Explicit closure is useful for tests and for hosts that manage the
+        # server lifecycle instead of leaving the process to exit naturally.
         await self.http.aclose()

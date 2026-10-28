@@ -8,6 +8,8 @@ from typing import Any
 
 
 def _number(value: Any) -> float | None:
+    # Open-Meteo can return null for unavailable observations. Keep those
+    # values explicit so callers can distinguish missing data from zero.
     return float(value) if isinstance(value, (int, float)) else None
 
 
@@ -24,6 +26,8 @@ def daily_gdd(
         high_num, low_num = _number(high), _number(low)
         value = None
         if high_num is not None and low_num is not None:
+            # The modified-average method caps both daily extremes before
+            # averaging, which prevents unusually hot days from dominating.
             high_clamped = min(max(high_num, base_temp_c), upper_cap_c)
             low_clamped = min(max(low_num, base_temp_c), upper_cap_c)
             value = round(((high_clamped + low_clamped) / 2) - base_temp_c, 2)
@@ -32,6 +36,8 @@ def daily_gdd(
 
 
 def summarize_gdd(days: list[dict[str, str | float | None]]) -> dict[str, Any]:
+    # Keep short requests detailed, but aggregate long requests to protect the
+    # model context from hundreds of daily records.
     total = round(sum(float(item["gdd"]) for item in days if item["gdd"] is not None), 2)
     if len(days) <= 31:
         return {"total_gdd": total, "daily": days}
@@ -58,13 +64,16 @@ def frost_nights(
         if numeric is None:
             continue
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        # Use evening through early morning as the practical overnight window.
         if parsed.hour >= 18 or parsed.hour < 9:
-            day = str(parsed.date() if parsed.hour >= 18 else parsed.date())
+            day = str(parsed.date())
             grouped.setdefault(day, []).append(numeric)
     result = []
     for day, values in sorted(grouped.items()):
         minimum = min(values)
         hours = sum(value < threshold_c for value in values)
+        # Risk is intentionally based on both threshold exposure and the
+        # nightly minimum, so a brief threshold crossing is still visible.
         risk = (
             "none"
             if hours == 0
@@ -92,6 +101,7 @@ def water_balance(
     result = []
     for day, rain, evap in zip(dates, precipitation, et0, strict=False):
         rain_num, evap_num = _number(rain), _number(evap)
+        # A missing input means the daily balance is unknown, not zero.
         result.append(
             {
                 "date": day,
@@ -104,6 +114,8 @@ def water_balance(
 
 
 def weekly_balance(days: list[dict[str, str | float | None]]) -> list[dict[str, Any]]:
+    # Weekly groups are consecutive chunks, with a shorter final group when
+    # the requested range does not end on a week boundary.
     result = []
     for index in range(0, len(days), 7):
         group = days[index : index + 7]

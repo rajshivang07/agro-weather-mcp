@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
 from typing import Any
 
@@ -30,9 +31,10 @@ _client_loop: object | None = None
 
 def client() -> OpenMeteoClient:
     global _client, _client_loop
-    import asyncio
 
     current_loop = asyncio.get_running_loop()
+    # Tests and some MCP hosts can create more than one event loop. An
+    # httpx.AsyncClient must not be reused across closed event loops.
     if _client is None or _client_loop is not current_loop:
         _client = OpenMeteoClient()
         _client_loop = current_loop
@@ -40,6 +42,7 @@ def client() -> OpenMeteoClient:
 
 
 def _location(lat: float, lon: float) -> None:
+    # Fail before making a network request so the model can correct the input.
     if not -90 <= lat <= 90:
         raise ValueError("lat must be between -90 and 90")
     if not -180 <= lon <= 180:
@@ -53,6 +56,8 @@ def _date_range(start_date: str, end_date: str) -> tuple[date, date]:
     if (end - start).days + 1 > 366:
         raise ValueError("date range cannot exceed 366 days")
     today = date.today()
+    # Archive data handles the past. Keep future requests within the forecast
+    # horizon supported by this server.
     if end >= today and (end - today).days >= MAX_FORECAST_DAYS:
         raise ValueError("forecast requests can extend at most 16 days from today")
     return start, end
@@ -75,6 +80,7 @@ async def _daily_parts(
     parts: list[dict[str, Any]] = []
     timezone = "auto"
     if start < today:
+        # Historical dates stop yesterday so today is not requested twice.
         past_end = min(end, today - timedelta(days=1))
         parts.append(
             await client().get(
@@ -90,6 +96,7 @@ async def _daily_parts(
             )
         )
     if end >= today:
+        # Forecast dates begin today, including a range that crosses the split.
         future_start = max(start, today)
         parts.append(
             await client().get(
@@ -110,6 +117,8 @@ async def _daily_parts(
 
 
 def _merge_daily(parts: list[dict[str, Any]], variables: list[str]) -> dict[str, list[Any]]:
+    # Both API responses use aligned daily arrays. Extending in request order
+    # preserves chronological order across the archive and forecast split.
     merged = {"time": []}
     for variable in variables:
         merged[variable] = []
@@ -318,10 +327,13 @@ async def get_soil_conditions(lat: float, lon: float) -> dict[str, Any]:
         },
     )
     hourly = data.get("hourly", {})
+    # The API request asks for three forecast days, then we retain only the
+    # current point and the next 48 hourly points for a compact response.
     times = hourly.get("time", [])[:49]
     depths = ("0_to_7cm", "7_to_28cm", "28_to_100cm", "100_to_255cm")
 
     def stats(values: list[Any]) -> dict[str, float | None]:
+        # Ignore null hourly values while preserving an all-missing result.
         numbers = [float(value) for value in values if isinstance(value, (int, float))]
         if not numbers:
             return {"min": None, "max": None, "average": None}
