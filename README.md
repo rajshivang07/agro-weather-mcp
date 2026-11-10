@@ -534,6 +534,40 @@ not crop specific advice.
 - “Which days this week look workable for fieldwork if I treat more than 5 mm in 3 days as too wet?”
 - “How many hours with humidity of 90 percent or more between 10 and 25 C are forecast over 3 days?”
 
+## Scope and guardrails
+
+This server answers weather questions for agriculture. It does not answer
+everything a farm assistant might be asked, and the model using it should say so
+instead of stretching a tool to fit. Out of scope, with no tool to call:
+
+- Anything unrelated to farm weather: general chat, coding, news, finance, health.
+- Agronomic decisions: product doses, crop or cultivar choice, disease diagnosis,
+  yield prediction, irrigation volumes, and legal or label compliance.
+- Data this server does not have: soil texture, satellite imagery, sensors or leaf
+  wetness measurements, market prices, pest counts, hail or lightning alerts, and
+  anything before 1940 or more than 16 days ahead.
+
+Built-in guardrails:
+
+- **Validation before any request:** invalid coordinates, dates, ranges and day
+  counts return an error and no Open-Meteo request is made. Coordinates are never
+  corrected silently.
+- **No silent all-clear:** NaN or infinite thresholds are rejected, because they
+  would turn every comparison false and report "no frost" or "no heat". An empty
+  upstream response is an error rather than a zero result, and missing hours are
+  counted (`hours_missing`, `hours_undetermined`, `missing_data`, `unknown`).
+- **Caveats in the response:** `get_spray_window`, `get_fieldwork_window` and
+  `get_wetness_hours` return a `note` saying that the limits are generic, that the
+  rating is a proxy, and that the product label and local rules take precedence.
+- **No crop knowledge:** a test fails if a tool schema, description or source file
+  names a specific crop.
+- **External text is data:** place names from the geocoder are shortened to 100
+  characters and flattened to one line before they are returned.
+- **Rate limits:** repeated identical requests are served from a short in-memory
+  cache. Do not use this server for bulk or commercial scraping of Open-Meteo.
+
+`docs/EVALS.md` includes prompts where the correct behaviour is to call no tool.
+
 ## Caution: what is not fully verified
 
 Please read this before relying on the tools. These points were not verified or
