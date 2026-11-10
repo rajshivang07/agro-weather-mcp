@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Guardrails:
+
+- Non-finite (NaN or infinite) numeric arguments are rejected in every tool with numeric parameters. Before, a NaN threshold made `get_frost_risk` report no risk for a freezing night.
+- An empty upstream response is now an error in the forecast tools and `get_chill_hours`, instead of a result with zero counts.
+- `get_heat_stress` reports `hours_missing`.
+- `get_spray_window`, `get_fieldwork_window` and `get_wetness_hours` return a `note` with their main caveat.
+- `geocode_location` shortens and flattens place text returned by the API.
+- New `tests/test_guardrails.py`, including a check that no tool names a specific crop.
+- `docs/EVALS.md` and `docs/EVAL_INTERACTIONS.md` gain out-of-scope and guardrail prompts where the correct behaviour is to call no tool, and a README "Scope and guardrails" section.
+
 ## 0.2.0
 
 New tools (all thresholds are user-supplied parameters with neutral defaults, and no crop knowledge is bundled):

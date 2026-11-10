@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -85,6 +87,37 @@ def _date_range(start_date: str, end_date: str) -> tuple[date, date]:
     if end >= today and (end - today).days >= MAX_FORECAST_DAYS:
         raise ValueError("forecast requests can extend at most 16 days from today")
     return start, end
+
+
+def _finite(**values: float | None) -> None:
+    # A NaN or infinite threshold makes every comparison false, which would
+    # silently report "no frost" or "no heat" instead of failing.
+    for name, value in values.items():
+        if value is not None and not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number")
+
+
+def _require_data(values: list[Any], what: str) -> None:
+    # An empty upstream payload must never look like a reassuring "zero" result.
+    if not values:
+        raise RuntimeError(
+            f"Open-Meteo returned no {what} for this request; "
+            "check the coordinates and dates, or try again later"
+        )
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _clean_text(value: Any, limit: int = 100) -> Any:
+    """Shorten and flatten text that comes from an external API.
+
+    Place names are data, not instructions. Keeping them short and on one line
+    limits how much free text a response can carry back to the model.
+    """
+    if not isinstance(value, str):
+        return value
+    return _CONTROL.sub(" ", value).strip()[:limit]
 
 
 def _days(days: int, maximum: int) -> None:
@@ -251,13 +284,13 @@ async def geocode_location(
     data = await client().get(GEOCODING_URL, params)
     places = [
         {
-            "name": item.get("name"),
-            "admin_area": item.get("admin1"),
-            "country": item.get("country"),
+            "name": _clean_text(item.get("name")),
+            "admin_area": _clean_text(item.get("admin1")),
+            "country": _clean_text(item.get("country")),
             "latitude": item.get("latitude"),
             "longitude": item.get("longitude"),
             "elevation": item.get("elevation"),
-            "timezone": item.get("timezone"),
+            "timezone": _clean_text(item.get("timezone")),
         }
         for item in data.get("results", [])
     ]
@@ -293,6 +326,7 @@ async def get_growing_degree_days(
     Example: ``get_growing_degree_days(38.54, -121.74, "2025-04-01", "2025-04-30")``.
     """
     _location(lat, lon)
+    _finite(base_temp_c=base_temp_c, upper_cap_c=upper_cap_c)
     start, end = _date_range(start_date, end_date)
     if base_temp_c >= upper_cap_c:
         raise ValueError("base_temp_c must be lower than upper_cap_c")
@@ -338,6 +372,7 @@ async def get_frost_risk(
     is the user's choice to adjust. Example: ``get_frost_risk(45.52, -122.68, 7, 0.0)``.
     """
     _location(lat, lon)
+    _finite(threshold_c=threshold_c)
     if not 1 <= days <= MAX_FORECAST_DAYS:
         raise ValueError("days must be between 1 and 16")
     start, end = date.today(), date.today() + timedelta(days=days - 1)
@@ -352,6 +387,7 @@ async def get_frost_risk(
         },
     )
     hourly = data.get("hourly", {})
+    _require_data(hourly.get("temperature_2m", []), "hourly temperature data")
     nights = frost_nights(hourly.get("time", []), hourly.get("temperature_2m", []), threshold_c)
     return {
         **_meta(lat, lon, str(start), str(end), data.get("timezone", "auto")),
@@ -529,6 +565,13 @@ async def get_spray_window(
     """
     _location(lat, lon)
     _days(days, 7)
+    _finite(
+        min_wind_kmh=min_wind_kmh,
+        max_wind_kmh=max_wind_kmh,
+        min_delta_t_c=min_delta_t_c,
+        max_delta_t_c=max_delta_t_c,
+        max_temp_c=max_temp_c,
+    )
     if min_wind_kmh < 0 or min_wind_kmh >= max_wind_kmh:
         raise ValueError("min_wind_kmh must be at least 0 and lower than max_wind_kmh")
     if min_delta_t_c >= max_delta_t_c:
@@ -549,6 +592,7 @@ async def get_spray_window(
     )
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
+    _require_data(times, "hourly forecast data")
     first = next((i for i, t in enumerate(times) if t >= _local_hour_label(data)), len(times))
     hours = spray_hours(
         times,
@@ -577,6 +621,10 @@ async def get_spray_window(
             "rain_free_hours": rain_free_hours,
             "rain_threshold_mm": 0.1,
         },
+        "note": (
+            "Generic rule-of-thumb limits only. The product label and local rules "
+            "take precedence. Wind is 10 m model grid data."
+        ),
         **spray_summary(hours),
     }
 
@@ -603,6 +651,7 @@ async def get_heat_stress(
     agronomic guidance. Example: ``get_heat_stress(30.0, 75.0, 7, 35.0)``.
     """
     _location(lat, lon)
+    _finite(threshold_c=threshold_c)
     _days(days, MAX_FORECAST_DAYS)
     start, end = date.today(), date.today() + timedelta(days=days - 1)
     data = await client().get(
@@ -617,12 +666,15 @@ async def get_heat_stress(
     )
     hourly = data.get("hourly", {})
     times, temperatures = hourly.get("time", []), hourly.get("temperature_2m", [])
+    _require_data(temperatures, "hourly temperature data")
     per_day = heat_days(times, temperatures, threshold_c)
     result = {
         **_meta(lat, lon, str(start), str(end), data.get("timezone", "auto")),
         "units": {"temperature": "°C", "hours": "hours"},
         "threshold_c": threshold_c,
         **heat_summary(per_day),
+        # Missing hours are reported so a gap is never read as "no heat".
+        "hours_missing": sum(1 for value in temperatures if not isinstance(value, (int, float))),
         "days": per_day,
     }
     if days <= 3:
@@ -669,6 +721,7 @@ async def get_chill_hours(
     "2025-11-01", "2026-02-28", "below_threshold", 7.2, 0.0, 1000)``.
     """
     _location(lat, lon)
+    _finite(threshold_c=threshold_c, lower_bound_c=lower_bound_c, target_hours=target_hours)
     start, end = _date_range(start_date, end_date)
     if method not in ("below_threshold", "utah"):
         raise ValueError("method must be 'below_threshold' or 'utah'")
@@ -685,6 +738,11 @@ async def get_chill_hours(
         lower_bound_c,
         target_hours,
     )
+    if summary["hours_evaluated"] == 0:
+        raise RuntimeError(
+            "Open-Meteo returned no temperature data for this range; "
+            "try different dates or try again later"
+        )
     result = {
         **_meta(lat, lon, str(start), str(end), timezone),
         "units": {
@@ -873,6 +931,13 @@ async def get_fieldwork_window(
     """
     _location(lat, lon)
     _days(days, 14)
+    _finite(
+        good_day_mm=good_day_mm,
+        good_lookback_mm=good_lookback_mm,
+        marginal_day_mm=marginal_day_mm,
+        marginal_lookback_mm=marginal_lookback_mm,
+        soil_moisture_max=soil_moisture_max,
+    )
     if not 1 <= lookback_days <= 14:
         raise ValueError("lookback_days must be between 1 and 14")
     if min(good_day_mm, good_lookback_mm, marginal_day_mm, marginal_lookback_mm) < 0:
@@ -894,6 +959,7 @@ async def get_fieldwork_window(
     data = await client().get(FORECAST_URL, params)
     daily = data.get("daily", {})
     dates = daily.get("time", [])
+    _require_data(dates, "daily precipitation data")
     moisture = None
     if soil_moisture_max is not None:
         hourly = data.get("hourly", {})
@@ -921,6 +987,10 @@ async def get_fieldwork_window(
             "lookback_days": lookback_days,
             "soil_moisture_max": soil_moisture_max,
         },
+        "note": (
+            "Rain-based proxy that is not soil-texture aware. It does not assess "
+            "whether your own field can carry machinery."
+        ),
         "good_days": sum(1 for day in rated if day["rating"] == "good"),
         "longest_good_run": longest_good_run(rated),
         "days": rated,
@@ -959,6 +1029,7 @@ async def get_wetness_hours(
     """
     _location(lat, lon)
     _days(days, 7)
+    _finite(min_rh_pct=min_rh_pct, min_temp_c=min_temp_c, max_temp_c=max_temp_c)
     if not 0 <= min_rh_pct <= 100:
         raise ValueError("min_rh_pct must be between 0 and 100")
     if min_temp_c > max_temp_c:
@@ -976,6 +1047,7 @@ async def get_wetness_hours(
     )
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
+    _require_data(times, "hourly forecast data")
     flags = wet_flags(
         hourly.get("temperature_2m", []),
         hourly.get("relative_humidity_2m", []),
@@ -993,6 +1065,10 @@ async def get_wetness_hours(
             "temp_range_c": [min_temp_c, max_temp_c],
             "count_rain_hours": count_rain_hours,
         },
+        "note": (
+            "Leaf wetness proxy from model humidity, rain and temperature. "
+            "It is not a disease risk model."
+        ),
         "total_wet_hours": sum(flag is True for flag in flags),
         "longest_wet_run_hours": longest_run(flags),
         "hours_undetermined": sum(flag is None for flag in flags),
