@@ -44,7 +44,7 @@ Example workflows include:
 - Calculate seasonal GDD from historical archive data and extend the range into the forecast when appropriate.
 - Check the next 7 days for overnight frost exposure before recommending a field visit or crop-protection review.
 - Compare precipitation with reference ET0 to identify periods that deserve closer soil-moisture monitoring.
-- Use the five standardized tools as a weather layer inside a larger farm assistant, while keeping farm-specific decisions in the application that owns the field data.
+- Use the eleven standardized tools as a weather layer inside a larger farm assistant, while keeping farm-specific decisions in the application that owns the field data.
 
 This project is best suited to local development, personal assistants, demos,
 education, research, and non-commercial prototypes that respect Open-Meteo's
@@ -81,6 +81,12 @@ claude mcp add agro-weather -- uvx --from git+https://github.com/rajshivang07/ag
 - `get_frost_risk`: summarize overnight minimums, threshold hours, and risk levels.
 - `get_water_balance`: compare precipitation with FAO-56 reference ET0 and explain dryness.
 - `get_soil_conditions`: summarize current and 48-hour soil temperature and moisture by depth.
+- `get_spray_window`: find forecast windows that meet user-set wind, Delta T, temperature and rain-free limits.
+- `get_heat_stress`: count forecast hours and consecutive days above a user-set temperature.
+- `get_chill_hours`: accumulate chill hours or Utah chill units over a date range.
+- `get_climate_anomaly`: compare a period's temperature and rainfall with the same window in baseline years.
+- `get_fieldwork_window`: rate days for field access from recent and forecast rain, optionally with a topsoil moisture limit.
+- `get_wetness_hours`: count humid or rainy hours within a temperature range as a leaf wetness proxy.
 
 ## Tool behavior and expected results
 
@@ -180,6 +186,11 @@ Risk is assigned using these server rules:
 The result is forecast-only and covers the current date through the requested
 number of forecast days in the resolved local timezone.
 
+The tool uses 2 m air temperature from model grid data. Ground and leaf frost
+can occur while the 2 m air temperature is above 0 °C, so a threshold of 2 °C
+is common for cautious planning. The default stays at 0 °C; choose the
+threshold that matches your own risk tolerance.
+
 ### `get_water_balance`
 
 Input:
@@ -204,9 +215,16 @@ water balance = precipitation - reference ET0
 The response contains total precipitation, total ET0, total balance, weekly
 balance summaries, and a server-generated `dryness_note`:
 
-- Balance at least 10 mm: `Likely water surplus`
-- Balance greater than -10 mm: `Roughly balanced`
-- Balance at or below -10 mm: `Likely drying conditions; monitor soil moisture and irrigation needs`
+The note thresholds scale with the length of the range: `0.35 mm/day`
+(about 10.5 mm over 30 days) with a 5 mm floor. With threshold `T`:
+
+| Total balance | `dryness_note` |
+| --- | --- |
+| at least `T` | `Likely water surplus` |
+| greater than `-T` and below `T` | `Roughly balanced` |
+| at or below `-T` | `Likely drying conditions; monitor soil moisture and irrigation needs` |
+
+The response also reports the threshold used as `dryness_threshold_mm`.
 
 The note is a simple weather-based interpretation. It is not an irrigation
 recommendation and does not model crop type, soil storage, runoff, or field
@@ -245,12 +263,315 @@ This is not a crop-specific threshold or agronomic recommendation. Actual
 sowing decisions should use crop-specific local guidance, soil conditions, and
 field observations.
 
-Example prompts:
+### `get_spray_window`
+
+Input:
+
+```json
+{
+  "lat": 52.52,
+  "lon": 13.41,
+  "days": 3,
+  "min_wind_kmh": 3.0,
+  "max_wind_kmh": 15.0,
+  "min_delta_t_c": 2.0,
+  "max_delta_t_c": 8.0,
+  "rain_free_hours": 3,
+  "max_temp_c": 30.0
+}
+```
+
+`days` must be between 1 and 7. The server forecasts hourly `temperature_2m`,
+`relative_humidity_2m`, `wind_speed_10m` (requested in km/h) and
+`precipitation`, and evaluates the next `days * 24` hours from the current local
+hour. Delta T is air temperature minus wet-bulb temperature, where wet-bulb comes
+from the Stull (2011) approximation. That approximation is defined for -20 to
+50 °C and 5 to 99 % relative humidity, so hours outside that range have no Delta
+T and count as unsuitable.
+
+An hour is suitable only when all of these hold:
+
+| Rule | Condition |
+| --- | --- |
+| Wind | `min_wind_kmh` <= wind <= `max_wind_kmh` |
+| Delta T | `min_delta_t_c` <= Delta T <= `max_delta_t_c` |
+| Temperature | temperature <= `max_temp_c` |
+| Rain | no hour in the next `rain_free_hours` hourly labels has precipitation above 0.1 mm |
+| Data | temperature, humidity, wind and the rain look-ahead are all available |
+
+Open-Meteo reports precipitation for the hour before each timestamp, so the rain
+check reads the labels after the evaluated hour.
+
+Output fields: `limits`, `evaluated_hours`, `suitable_hours`, `windows` (each with
+`start`, an exclusive `end`, and `hours`), `longest_window`, and
+`unsuitable_hours_by_limit`. Limit names are `wind_too_low`, `wind_too_high`,
+`delta_t_too_low`, `delta_t_too_high`, `delta_t_unavailable`,
+`temperature_too_high`, `rain_expected` and `missing_data`. An hour that fails
+several limits is counted under each. The full hourly list is not returned.
+
+The thresholds are generic rules of thumb. The product label and local rules take
+precedence, and model wind is 10 m grid data rather than wind at the nozzle.
+
+### `get_heat_stress`
+
+Input:
+
+```json
+{
+  "lat": 30.0,
+  "lon": 75.0,
+  "days": 7,
+  "threshold_c": 35.0
+}
+```
+
+`days` must be between 1 and 16. The structure mirrors `get_frost_risk`. The
+server requests hourly `temperature_2m` and returns, per local day, the maximum
+temperature and the hours strictly above `threshold_c`. The result also contains
+`total_hours_above_threshold` and `longest_streak_days`, the longest run of
+consecutive days with at least one hour above the threshold. A day without data
+ends a streak. Hourly temperatures are added as `hourly` only when `days` is 3
+or fewer.
+
+The right threshold depends on the crop, growth stage or species and must be
+chosen by you. The default of 35 °C is a generic placeholder.
+
+### `get_chill_hours`
+
+Input:
+
+```json
+{
+  "lat": 44.0,
+  "lon": -121.3,
+  "start_date": "2025-11-01",
+  "end_date": "2026-02-28",
+  "method": "below_threshold",
+  "threshold_c": 7.2,
+  "lower_bound_c": 0.0,
+  "target_hours": 1000
+}
+```
+
+Dates are inclusive and the range can be at most 366 days. Hourly `temperature_2m`
+comes from the archive and the forecast, merged when the range reaches recent days.
+Two methods are supported:
+
+| Method | Rule |
+| --- | --- |
+| `below_threshold` | counts hours with `lower_bound_c` <= temperature <= `threshold_c`; with `lower_bound_c` set to null it counts every hour at or below the threshold |
+| `utah` | Utah chill units per hour from the table below; `threshold_c` and `lower_bound_c` are ignored |
+
+Utah weights (Richardson, Seeley and Walker, 1974, HortScience 9(4):331-332, as
+commonly tabulated in degrees Celsius):
+
+| Temperature | Chill units per hour |
+| --- | --- |
+| 1.4 °C or below | 0 |
+| 1.5 to 2.4 °C | 0.5 |
+| 2.5 to 9.1 °C | 1.0 |
+| 9.2 to 12.4 °C | 0.5 |
+| 12.5 to 15.9 °C | 0 |
+| 16.0 to 18.0 °C | -0.5 |
+| above 18.0 °C | -1.0 |
+
+Measured temperatures fall between the tabulated tenths, so each band is applied
+up to the next band's lower edge (for example 2.45 °C earns 0.5). Output fields:
+`total`, `monthly` (value per month, which can be negative for Utah),
+`hours_evaluated`, `hours_missing`, and `target` with `percent_of_target` when
+`target_hours` is given.
+
+Chilling requirements vary by species and cultivar and the tool carries none. The
+Utah model performs poorly in warm winters.
+
+### `get_climate_anomaly`
+
+Input:
+
+```json
+{
+  "lat": 48.85,
+  "lon": 2.35,
+  "start_date": "2025-06-01",
+  "end_date": "2025-08-31",
+  "baseline_start_year": 1991,
+  "baseline_end_year": 2020
+}
+```
+
+The range can be at most 366 days and must end at least 5 days before today,
+because archive data lags. A later end date returns an error that names the latest
+usable end date. The baseline must span at least 10 years.
+
+For each baseline year the same window is taken: the same start month and day and
+the same number of days, so totals are comparable. Feb 29 starts map to Feb 28 in
+non-leap years. A window spanning New Year is labelled by the year it starts in,
+and windows that would run past the final baseline year are dropped. A year with
+any missing day is skipped for that variable.
+
+For temperature (mean of the daily mean) and precipitation (total) the result
+contains `target`, `baseline_mean`, `baseline_std` (sample standard deviation),
+the anomaly (`anomaly_c` or `anomaly_mm`) and `percentile_rank`. The percentile is
+the share of baseline years below the target, with ties counting half. Rainfall
+also has `percent_of_normal`, which is null when the baseline mean is 0. The
+`baseline` block reports the years used and the coordinates used.
+
+Both the baseline and the target are requested at coordinates rounded to 0.1
+degrees, so they come from the same ERA5 grid area. The baseline is cached in
+memory for 24 hours per rounded location and year range. Because both sides come
+from one dataset, ERA5 bias largely cancels. This is a comparison with the chosen
+baseline and is not a drought index.
+
+### `get_fieldwork_window`
+
+Input:
+
+```json
+{
+  "lat": 51.5,
+  "lon": -0.1,
+  "days": 7,
+  "good_day_mm": 1.0,
+  "good_lookback_mm": 5.0,
+  "marginal_day_mm": 5.0,
+  "marginal_lookback_mm": 15.0,
+  "lookback_days": 3,
+  "soil_moisture_max": 0.35
+}
+```
+
+`days` must be between 1 and 14, `lookback_days` between 1 and 14, and
+`soil_moisture_max` (optional, m³/m³) between 0 and 1. The lookback total is the
+rain on the days before the day being rated, including past days. Each day is
+rated:
+
+| Rating | Rule |
+| --- | --- |
+| `good` | day rain <= `good_day_mm` and lookback rain <= `good_lookback_mm` |
+| `marginal` | not good, but day rain <= `marginal_day_mm` and lookback rain <= `marginal_lookback_mm` |
+| `poor` | anything else |
+| `unknown` | rain data is missing for the day or its lookback |
+
+When `soil_moisture_max` is set, a day whose mean forecast topsoil (0 to 7 cm)
+moisture is above it drops one level (`good` to `marginal`, `marginal` to
+`poor`). Output fields: `limits`, `good_days`, `longest_good_run` (`start`, `end`,
+`days`, or null) and `days`, each with `rating`, `rain_mm`, `lookback_rain_mm` and
+`reasons`.
+
+This is a rain-based proxy and is not soil-texture aware, because Open-Meteo has
+no soil texture data. Users with known soil should set the limits and
+`soil_moisture_max` themselves.
+
+### `get_wetness_hours`
+
+Input:
+
+```json
+{
+  "lat": 45.0,
+  "lon": 9.2,
+  "days": 3,
+  "min_rh_pct": 90.0,
+  "min_temp_c": 10.0,
+  "max_temp_c": 25.0,
+  "count_rain_hours": true
+}
+```
+
+`days` must be between 1 and 7. An hour is wet when its temperature is within
+`min_temp_c` to `max_temp_c` (inclusive) and either relative humidity is at or
+above `min_rh_pct` or, when `count_rain_hours` is true, precipitation in that hour
+is above 0 mm. An hour whose state cannot be decided because of missing data is
+not counted and ends a run; these are reported as `hours_undetermined`.
+
+Output fields: `criteria`, `total_wet_hours`, `longest_wet_run_hours` (over the
+whole period, which can cross midnight), `hours_undetermined`, and `days` with
+`wet_hours` and `longest_wet_run_hours` within each local day. `wet_hour_times`
+lists the wet hours only when `days` is 3 or fewer.
+
+This is a leaf wetness proxy only. Open-Meteo has no leaf wetness data, the
+output is not a disease risk model, and no pathogen or crop presets are included.
+
+### Choosing between similar tools
+
+| If the question is about | Use | Not |
+| --- | --- | --- |
+| cold nights | `get_frost_risk` | `get_heat_stress` |
+| hot hours or hot days | `get_heat_stress` | `get_frost_risk` |
+| soil temperature or moisture now | `get_soil_conditions` | `get_fieldwork_window` |
+| which days are workable | `get_fieldwork_window` | `get_soil_conditions` |
+| rain minus ET0 over a period | `get_water_balance` | `get_wetness_hours` |
+| humid or rainy hours in a temperature range | `get_wetness_hours` | `get_water_balance` |
+| warm-season heat accumulation | `get_growing_degree_days` | `get_chill_hours` |
+| winter chilling | `get_chill_hours` | `get_growing_degree_days` |
+| a period versus normal years | `get_climate_anomaly` | `get_water_balance` |
+| timing a spray | `get_spray_window` | `get_wetness_hours` |
+
+## No crop knowledge is bundled
+
+None of the tools knows which crop, cultivar, species or soil you are working
+with. Anything crop, species or soil specific, such as a frost, heat or chill
+threshold, a chilling requirement, a spray limit, rain limits for field access or
+humidity limits for wetness, is a parameter with a neutral default. The defaults
+are generic placeholders, not recommendations, and each tool's description says
+so. Choose the values from your own agronomic guidance and local rules.
+
+The one older exception is the short, clearly labelled `sowing_note` in
+`get_soil_conditions`, which gives a rough generic soil temperature remark and is
+not crop specific advice.
+
+## Example prompts
+
 
 - “Find the three closest matches for Davis, California, then calculate April GDD using a 10 C base.”
 - “What is the frost risk for this location over the next seven days at 0 C?”
 - “Was the last month wetter or drier than reference crop demand?”
 - “What are the current and next-48-hour soil conditions at this location?”
+- “Which hours in the next 3 days have wind between 3 and 15 km/h and a Delta T of 2 to 8 C, with no rain for 3 hours?”
+- “How many hours above 36 C and how many consecutive hot days are forecast this week?”
+- “How many chill hours between 0 and 7.2 C have accumulated since 1 November?”
+- “Was last June warmer or wetter than the 1991 to 2020 normal at this location?”
+- “Which days this week look workable for fieldwork if I treat more than 5 mm in 3 days as too wet?”
+- “How many hours with humidity of 90 percent or more between 10 and 25 C are forecast over 3 days?”
+
+## Caution: what is not fully verified
+
+Please read this before relying on the tools. These points were not verified or
+rest on assumptions, as of version 0.2.0:
+
+- **Test data:** the automated tests use fixtures written by the authors, not
+  recorded Open-Meteo responses. A live smoke test per tool confirms that real
+  requests succeed and return the expected fields, but it does not check the
+  numbers against an independent source.
+- **Utah chill units:** the temperature bands and weights come from published
+  software implementations that cite Richardson et al. (1974). The original paper
+  was not consulted. Temperatures between the tabulated tenths are assigned to the
+  band below the next band's lower edge, so 1.45 °C counts as 0. The Utah model
+  also performs poorly in warm winters.
+- **Wet-bulb and Delta T:** the Stull (2011) approximation is stated to be accurate
+  within about -1 to +0.65 °C, only for -20 to 50 °C and 5 to 99 % relative
+  humidity, and it assumes standard sea-level pressure. Results at high elevation
+  are less accurate. The formula was checked against Stull's published example and
+  an independent psychrometric calculation, not against the original paper's text.
+- **Archive lag:** the server assumes archive data is final about 5 days behind
+  today and takes more recent dates from the forecast. The real lag can differ, and
+  recent archive values can be revised.
+- **Forecast history:** the hourly helper reaches back at most 92 days through
+  Open-Meteo's `past_days` parameter, the documented limit.
+- **Daylight saving time:** hourly timestamps are treated as a regular grid of local
+  labels. Behaviour around clock changes was not tested.
+- **Rate limits and large requests:** behaviour under repeated use of the free tier
+  was not tested. `get_climate_anomaly` downloads a 30-year daily baseline (about
+  11,000 rows) once per rounded location, then caches it for 24 hours in memory.
+- **Model data, not measurements:** all values are gridded model or reanalysis data,
+  including 10 m wind, 2 m air temperature and topsoil moisture. They can differ
+  from conditions in your field, at the nozzle or at canopy height.
+- **Proxies and rules of thumb:** `get_fieldwork_window` is a rain-based proxy that
+  is not soil-texture aware, `get_wetness_hours` is a leaf wetness proxy and not a
+  disease model, and the spray limits are generic rules of thumb. The product label
+  and local rules take precedence.
+- **Defaults are placeholders:** no default threshold is crop, cultivar, species or
+  soil specific advice. See "No crop knowledge is bundled".
 
 ## Data and limits
 
@@ -267,7 +588,7 @@ and management decisions require local expertise and appropriate observations.
 
 Run the server through the MCP Inspector with the project command configured as
 `uv run agro-weather-mcp` and transport set to stdio. The Inspector can list the
-five tools and invoke them with JSON arguments without needing a hosted endpoint.
+eleven tools and invoke them with JSON arguments without needing a hosted endpoint.
 
 ## Development
 

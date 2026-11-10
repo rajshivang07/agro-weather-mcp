@@ -13,13 +13,16 @@ class OpenMeteoClient:
     def __init__(self, timeout: float = 20.0, ttl_seconds: int = 600):
         self.http = httpx.AsyncClient(timeout=timeout)
         self.ttl_seconds = ttl_seconds
+        # Each entry stores its own expiry so callers can request a longer TTL.
         self._cache: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[float, Any]] = {}
 
-    async def get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def get(
+        self, url: str, params: dict[str, Any], ttl_seconds: int | None = None
+    ) -> dict[str, Any]:
         # Sorting makes equivalent parameter dictionaries share one cache key.
         key = (url, tuple(sorted((str(k), str(v)) for k, v in params.items())))
         cached = self._cache.get(key)
-        if cached and time.monotonic() - cached[0] < self.ttl_seconds:
+        if cached and time.monotonic() < cached[0]:
             return cached[1]
         last_error: Exception | None = None
         for attempt in range(3):
@@ -32,7 +35,11 @@ class OpenMeteoClient:
                 response.raise_for_status()
                 data = response.json()
                 # Cache only successful JSON responses, never errors.
-                self._cache[key] = (time.monotonic(), data)
+                now = time.monotonic()
+                # Drop expired entries so large responses do not accumulate.
+                self._cache = {k: v for k, v in self._cache.items() if now < v[0]}
+                ttl = self.ttl_seconds if ttl_seconds is None else ttl_seconds
+                self._cache[key] = (now + ttl, data)
                 return data
             except (httpx.HTTPError, ValueError) as exc:
                 last_error = exc
